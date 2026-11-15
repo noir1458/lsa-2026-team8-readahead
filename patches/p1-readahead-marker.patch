@@ -1,0 +1,24 @@
+P1: 작은 window 단계에서 readahead marker를 늦춘다
+
+대상: Linux 5.4.214, mm/readahead.c 의 ondemand_readahead()
+적용: 커널 소스 최상위에서 patch -p1 < p1-readahead-marker.patch
+
+--- a/mm/readahead.c
++++ b/mm/readahead.c
+@@ -489,6 +489,16 @@
+ 		}
+ 	}
+ 
++	/*
++	 * P1: for single-page requests, while the window is still below the
++	 * maximum, keep the readahead marker in the second half of the window.
++	 * A short burst is then less likely to reach the marker and trigger
++	 * the next window, which would go unused after the reader jumps away.
++	 */
++	if (req_size == 1 && ra->size < max_pages)
++		ra->async_size = min_t(unsigned int, ra->async_size,
++				       max_t(unsigned int, 1, ra->size / 2));
++
+ 	return ra_submit(ra, mapping, filp);
+ }
+ 
