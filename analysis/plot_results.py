@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """측정 결과 그래프.
 
-results/compare_*.csv 를 읽어 analysis/ 에 그림 3장과 요약표를 만든다.
+results/compare_*.csv 와 results/smallfile_*.csv 를 읽어 analysis/ 에 그림 4장과
+요약표 2개를 만든다.
 
-  fig1_read_pages.png   burst 한 번에 디스크에서 읽힌 페이지 수
-  fig2_burst_time.png   burst 읽기에 걸린 시간
-  fig3_seq_time.png     긴 순차 읽기에 걸린 시간
-  summary.csv           조건·패턴별 중앙값, 최소, 최대
+  fig1_read_pages.png      burst 한 번에 디스크에서 읽힌 페이지 수
+  fig2_burst_time.png      burst 읽기에 걸린 시간
+  fig3_seq_time.png        긴 순차 읽기에 걸린 시간
+  fig4_smallfile_wait.png  작은 파일 순차 읽기에서 pread 안에서 기다린 시간
+  summary.csv              조건·패턴별 중앙값, 최소, 최대
+  summary_smallfile.csv    작은 파일 순차 읽기의 중앙값, 최소, 최대
 
 실행: python3 analysis/plot_results.py   (matplotlib 필요)
 """
@@ -37,6 +40,8 @@ CONDS = [
 ]
 BURSTS = [2, 3, 4, 8, 16]
 PAGE = 4096
+SMALL_SIZES = [64, 256, 1024]  # 작은 파일 크기 (KiB)
+THINKS = [0, 50, 200]          # 페이지마다 머무는 시간 (마이크로초)
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -85,21 +90,29 @@ def stats(rows):
     }
 
 
-def figure(w, h, title, subtitle, left, bottom, right, top):
-    """w x h 픽셀 그림과 그 안의 그래프 영역을 만든다. 여백도 픽셀 단위."""
+def canvas(w, h, title, subtitle):
+    """w x h 픽셀 그림에 제목, 부제, 아래 설명을 넣는다."""
     fig = plt.figure(figsize=(w / 100, h / 100), dpi=200, facecolor=SURFACE)
-    ax = fig.add_axes(
-        [left / w, bottom / h, (w - left - right) / w, (h - bottom - top) / h],
-        facecolor=SURFACE,
-    )
-    ax.plot_px = (w - left - right, h - bottom - top)
     fig.text(16 / w, (h - 30) / h, title, fontsize=13, fontweight="bold", color=INK)
     fig.text(16 / w, (h - 52) / h, subtitle, fontsize=9, color=INK2)
     fig.text(16 / w, 10 / h, FOOT, fontsize=7.5, color=MUTED)
+    return fig
+
+
+def panel(fig, w, h, left, bottom, width, height):
+    """그림 안에 그래프 영역 하나를 만든다. 위치와 크기는 픽셀 단위."""
+    ax = fig.add_axes([left / w, bottom / h, width / w, height / h], facecolor=SURFACE)
+    ax.plot_px = (width, height)
     for side in ("top", "right", "left", "bottom"):
         ax.spines[side].set_visible(False)
     ax.tick_params(length=0, labelsize=8.5, labelcolor=MUTED)
-    return fig, ax
+    return ax
+
+
+def figure(w, h, title, subtitle, left, bottom, right, top):
+    """그래프 영역이 하나인 그림. 여백은 픽셀 단위."""
+    fig = canvas(w, h, title, subtitle)
+    return fig, panel(fig, w, h, left, bottom, w - left - right, h - bottom - top)
 
 
 def legend(fig, handles, w, h, y):
@@ -248,6 +261,98 @@ def fig3_seq_time(data):
     plt.close(fig)
 
 
+def load_small():
+    """(조건, 파일 크기 KiB, 머무는 시간) -> 측정 행 목록"""
+    data = {}
+    for path in sorted(glob.glob(os.path.join(ROOT, "results", "smallfile_*.csv"))):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                key = (row["label"], int(row["file_kib"]), int(row["think_us"]))
+                data.setdefault(key, []).append(row)
+    return data
+
+
+def small_stats(rows):
+    wait = [float(r["pread_ms"]) for r in rows]
+    total = [float(r["elapsed_ms"]) for r in rows]
+    return {
+        "runs": len(rows),
+        "kernel": rows[0]["kernel"],
+        "files": int(rows[0]["files"]),
+        "read_mib": statistics.median(int(r["read_bytes"]) for r in rows) / 2**20,
+        "w_med": statistics.median(wait), "w_min": min(wait), "w_max": max(wait),
+        "t_med": statistics.median(total), "t_min": min(total), "t_max": max(total),
+    }
+
+
+def fig4_smallfile_wait(small):
+    w, h = 800, 470
+    fig = canvas(
+        w, h, "작은 파일을 처음부터 끝까지 읽을 때 pread에서 기다린 시간",
+        "파일 묶음 하나를 읽는 동안의 합 (ms). 점은 5회 중앙값, 세로선은 최소~최대. "
+        "숫자는 P1이 B0보다 늘어난 비율이고, 굵은 것은 두 범위가 겹치지 않는 조건",
+    )
+    left, bottom, right, top, gap = 52, 80, 20, 128, 26
+    pw = (w - left - right - gap * (len(SMALL_SIZES) - 1)) / len(SMALL_SIZES)
+    ph = h - bottom - top
+    pair = [c for c in CONDS if c[0] in ("B0", "P1")]
+    step = 22
+    for p, kib in enumerate(SMALL_SIZES):
+        ax = panel(fig, w, h, left + p * (pw + gap), bottom, pw, ph)
+        ax.set_xlim(-0.5, len(THINKS) - 0.5)
+        ax.set_xticks(range(len(THINKS)))
+        ax.set_xticklabels([f"{t}µs" for t in THINKS], fontsize=9, color=INK2)
+        ax.set_ylim(0, 1500)
+        ax.set_yticks([0, 250, 500, 750, 1000, 1250])
+        ax.set_yticklabels(["0", "250", "500", "750", "1,000", "1,250"] if p == 0 else [])
+        ax.yaxis.grid(True, color=GRID, linewidth=PT)
+        ax.set_axisbelow(True)
+        ax.axhline(0, color=AXIS, linewidth=PT)
+        if p == 1:
+            ax.set_xlabel("페이지 하나를 읽은 뒤 머무는 시간", fontsize=8.5, color=MUTED, labelpad=6)
+        files = small_stats(small[("B0", kib, 0)])["files"]
+        ax.set_title(f"{kib} KiB 파일 {files}개", fontsize=9.5, color=INK2, loc="left", pad=6)
+
+        ux, _ = units_per_px(ax)
+        for g, think in enumerate(THINKS):
+            b0 = small_stats(small[("B0", kib, think)])
+            p1 = small_stats(small[("P1", kib, think)])
+            for i, (s, (_, _, color, _)) in enumerate(zip((b0, p1), pair)):
+                x = g + (i - 0.5) * step * ux
+                ax.plot([x, x], [s["w_min"], s["w_max"]], color=color, linewidth=2 * PT,
+                        solid_capstyle="round")
+                ax.plot([x], [s["w_med"]], marker="o", markersize=7, color=color,
+                        markeredgecolor=SURFACE, markeredgewidth=2 * PT)
+            apart = b0["w_max"] < p1["w_min"] or p1["w_max"] < b0["w_min"]
+            change = (p1["w_med"] / b0["w_med"] - 1) * 100
+            ax.annotate(f"{change:+.0f}%", (g, max(b0["w_max"], p1["w_max"])), xytext=(0, 5),
+                        textcoords="offset points", ha="center", va="bottom", fontsize=8.5,
+                        color=INK if apart else MUTED, fontweight="bold" if apart else "normal")
+    handles = [Line2D([], [], marker="o", linestyle="none", markersize=7, color=color,
+                      markeredgecolor=SURFACE, markeredgewidth=2 * PT, label=lab)
+               for _, lab, color, _ in pair]
+    legend(fig, handles, w, h, 68)
+    fig.savefig(os.path.join(OUT, "fig4_smallfile_wait.png"), facecolor=SURFACE)
+    plt.close(fig)
+
+
+def write_small_summary(small):
+    path = os.path.join(OUT, "summary_smallfile.csv")
+    with open(path, "w", newline="") as f:
+        out = csv.writer(f)
+        out.writerow(["condition", "kernel", "file_kib", "files", "think_us", "runs", "read_mib",
+                      "pread_ms_median", "pread_ms_min", "pread_ms_max",
+                      "time_ms_median", "time_ms_min", "time_ms_max"])
+        for name in ("B0", "P1"):
+            for kib in SMALL_SIZES:
+                for think in THINKS:
+                    s = small_stats(small[(name, kib, think)])
+                    out.writerow([name, s["kernel"], kib, s["files"], think, s["runs"],
+                                  f"{s['read_mib']:.1f}",
+                                  f"{s['w_med']:.1f}", f"{s['w_min']:.1f}", f"{s['w_max']:.1f}",
+                                  f"{s['t_med']:.1f}", f"{s['t_min']:.1f}", f"{s['t_max']:.1f}"])
+
+
 def write_summary(data):
     path = os.path.join(OUT, "summary.csv")
     with open(path, "w", newline="") as f:
@@ -270,6 +375,9 @@ def main():
     fig2_burst_time(data)
     fig3_seq_time(data)
     write_summary(data)
+    small = load_small()
+    fig4_smallfile_wait(small)
+    write_small_summary(small)
     print("저장:", OUT)
 
 
