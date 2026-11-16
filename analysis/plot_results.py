@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """측정 결과 그래프.
 
-results/compare_*.csv 와 results/smallfile_*.csv 를 읽어 analysis/ 에 그림 4장과
-요약표 2개를 만든다.
+results/compare_*.csv, results/smallfile_*.csv, results/sweep_*.csv 를 읽어
+analysis/ 에 그림 5장과 요약표 3개를 만든다.
 
   fig1_read_pages.png      burst 한 번에 디스크에서 읽힌 페이지 수
   fig2_burst_time.png      burst 읽기에 걸린 시간
   fig3_seq_time.png        긴 순차 읽기에 걸린 시간
   fig4_smallfile_wait.png  작은 파일 순차 읽기에서 pread 안에서 기다린 시간
+  fig5_burst_sweep.png     burst 길이 1~32페이지별로 읽힌 페이지 수
   summary.csv              조건·패턴별 중앙값, 최소, 최대
   summary_smallfile.csv    작은 파일 순차 읽기의 중앙값, 최소, 최대
+  summary_sweep.csv        burst 길이별 읽힌 페이지 수 (중앙값)
 
 실행: python3 analysis/plot_results.py   (matplotlib 필요)
 """
@@ -369,6 +371,80 @@ def write_summary(data):
                               f"{s['t_med']:.1f}", f"{s['t_min']:.1f}", f"{s['t_max']:.1f}"])
 
 
+def load_sweep():
+    """(조건, burst 길이) -> 측정 행 목록"""
+    data = {}
+    for path in sorted(glob.glob(os.path.join(ROOT, "results", "sweep_*.csv"))):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                data.setdefault((row["label"], int(row["burst_pages"])), []).append(row)
+    return data
+
+
+def sweep_ranges(sweep, lengths):
+    """P1이 B0보다 덜 읽은 burst 길이를 이어진 구간으로 묶는다."""
+    less = [b for b in lengths
+            if stats(sweep[("P1", b)])["read_pages"] < stats(sweep[("B0", b)])["read_pages"] - 0.5]
+    ranges = []
+    for b in less:
+        if ranges and ranges[-1][1] == b - 1:
+            ranges[-1][1] = b
+        else:
+            ranges.append([b, b])
+    return ranges
+
+
+def fig5_sweep(sweep):
+    lengths = sorted({b for (_, b) in sweep})
+    w, h = 800, 470
+    fig, ax = figure(
+        w, h, "burst 길이별로 디스크에서 읽힌 양",
+        "burst 한 번에 읽힌 페이지 수. 색칠한 곳이 P1이 덜 읽은 길이이고, 나머지는 두 선이 겹친다",
+        left=52, bottom=80, right=20, top=106,
+    )
+    ax.set_xlim(0.5, lengths[-1] + 0.5)
+    ax.set_xticks([1, 4, 8, 12, 16, 20, 24, 28, 32])
+    ax.set_xlabel("한 번에 이어서 읽는 길이 (burst, 페이지)", fontsize=8.5, color=MUTED, labelpad=6)
+    ax.set_ylim(0, 100)
+    ax.set_yticks([0, 20, 40, 60, 80, 100])
+    ax.yaxis.grid(True, color=GRID, linewidth=PT)
+    ax.set_axisbelow(True)
+    ax.axhline(0, color=AXIS, linewidth=PT)
+
+    for lo, hi in sweep_ranges(sweep, lengths):
+        ax.axvspan(lo - 0.5, hi + 0.5, color="#eb6834", alpha=0.10, linewidth=0)
+        label = f"{lo}" if lo == hi else f"{lo}~{hi}"
+        ax.annotate(label, ((lo + hi) / 2, 100), xytext=(0, -4), textcoords="offset points",
+                    ha="center", va="top", fontsize=8.5, color="#eb6834")
+
+    ax.plot(lengths, lengths, color=NEED, linewidth=1.5 * PT, linestyle=(0, (4, 3)))
+    pair = [c for c in CONDS if c[0] in ("B0", "P1")]
+    for name, _, color, _ in pair:
+        ys = [stats(sweep[(name, b)])["read_pages"] for b in lengths]
+        ax.plot(lengths, ys, drawstyle="steps-mid", color=color, linewidth=2 * PT)
+        ax.plot(lengths, ys, linestyle="none", marker="o", markersize=4, color=color,
+                markeredgecolor=SURFACE, markeredgewidth=PT)
+    handles = [Line2D([], [], color=NEED, linewidth=1.5 * PT, linestyle=(0, (4, 3)),
+                      label="필요한 양")]
+    handles += [Line2D([], [], color=color, linewidth=2 * PT, marker="o", markersize=4,
+                       markeredgecolor=SURFACE, label=lab) for _, lab, color, _ in pair]
+    legend(fig, handles, w, h, 68)
+    fig.texts[-1].set_text(FOOT.replace("조건마다 5회", "길이마다 3회"))
+    fig.savefig(os.path.join(OUT, "fig5_burst_sweep.png"), facecolor=SURFACE)
+    plt.close(fig)
+
+
+def write_sweep_summary(sweep):
+    lengths = sorted({b for (_, b) in sweep})
+    path = os.path.join(OUT, "summary_sweep.csv")
+    with open(path, "w", newline="") as f:
+        out = csv.writer(f)
+        out.writerow(["burst_pages"] + [f"{name}_read_pages" for name, _, _, _ in CONDS])
+        for b in lengths:
+            out.writerow([b] + [f"{stats(sweep[(name, b)])['read_pages']:.2f}"
+                                for name, _, _, _ in CONDS])
+
+
 def main():
     data = load()
     fig1_read_pages(data)
@@ -378,6 +454,9 @@ def main():
     small = load_small()
     fig4_smallfile_wait(small)
     write_small_summary(small)
+    sweep = load_sweep()
+    fig5_sweep(sweep)
+    write_sweep_summary(sweep)
     print("저장:", OUT)
 
 
